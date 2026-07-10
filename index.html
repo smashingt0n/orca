@@ -743,8 +743,8 @@ function renderLeadership(){
 
   document.getElementById('table-container').innerHTML = `
     <div class="chart-row casualty" style="margin-bottom:0;">
-      <div class="top30-col"><h3><span class="dot orca"></span> Orca Leadership <span class="small-note">(${fmt(orcaTotal)} kills)</span></h3>${buildTable(orca)}</div>
-      <div class="top30-col"><h3><span class="dot cerb"></span> Cerb Leadership <span class="small-note">(${fmt(cerbTotal)} kills)</span></h3>${buildTable(cerb)}</div>
+      <div class="top30-col"><h3><span class="dot orca"></span> Orca Leadership <span class="small-note">(war total: ${fmt(trueTotals.Orca)} kills)</span></h3>${buildTable(orca)}</div>
+      <div class="top30-col"><h3><span class="dot cerb"></span> Cerb Leadership <span class="small-note">(war total: ${fmt(trueTotals.Cerb)} kills)</span></h3>${buildTable(cerb)}</div>
     </div>`;
 }
 
