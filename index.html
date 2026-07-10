@@ -256,7 +256,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       </div>
       <div class="chart-container tall" style="display:flex;flex-direction:column;">
         <h3 id="player-chart-title">Select players from the list to compare kill trajectories</h3>
-        <div class="desc" id="player-chart-desc">Click a player to add/remove them from the chart. Dashed segments mark the Jun 1 &rarr; Jun 16 window in which a switch occurred (kills split evenly between alliances).</div>
+        <div class="desc" id="player-chart-desc">Click a player to add/remove them from the chart. For alliance switchers, the line is colored red while on Cerb and blue while on Orca, with a gold dashed segment marking the window in which the switch occurred (kills split between alliances since the exact switch point is unknown).</div>
         <canvas id="chart-player" style="flex:1;"></canvas>
       </div>
     </div>
@@ -431,6 +431,23 @@ function killsForAllianceInRange(p, alliance, fromIdx, toIdx){
   return total;
 }
 
+// True whole-alliance total across ALL matching players' segments in range -- not a sum of
+// displayed rows. This is what correctly credits a switcher's Cerb-tenure kills to Cerb and
+// Orca-tenure kills to Orca even though they only ever appear as a single row (tagged by
+// their current alliance), and credits a casualty's pre-departure kills to their old side
+// instead of dropping them because they're gone by the range's "To" date.
+function allianceTotalsInRange(fromIdx, toIdx, filterFn){
+  const totals = {Orca:0, Cerb:0};
+  players.filter(filterFn || (()=>true)).forEach(p=>{
+    p.segments.forEach(s=>{
+      const si = BUNDLE.date_order.indexOf(s.from);
+      const ei = BUNDLE.date_order.indexOf(s.to);
+      if(si>=fromIdx && ei<=toIdx) totals[s.alliance] += s.delta;
+    });
+  });
+  return totals;
+}
+
 function computeRows(){
   const fromIdx = BUNDLE.date_order.indexOf(state.fromDate);
   const toIdx = BUNDLE.date_order.indexOf(state.toDate);
@@ -448,7 +465,9 @@ function computeRows(){
     // "Gained" is scoped to only the segments earned while flying THIS row's alliance
     // within the selected range -- for non-switchers this is identical to tp.kills-fp.kills;
     // for switchers it stops their pre-switch alliance's kills from bleeding into the total.
-    const gained = (fp && tp) ? killsForAllianceInRange(p, alliance, fromIdx, toIdx) : null;
+    // Computed for left/joined rows too (not just active) so a casualty's real pre-departure
+    // contribution still counts instead of showing as blank/zero.
+    const gained = (fp || tp) ? killsForAllianceInRange(p, alliance, fromIdx, toIdx) : null;
     return {
       key:p.key, name:p.name, is_leader:p.is_leader, switched_alliance:p.switched_alliance,
       alliance, status, gained,
@@ -523,11 +542,28 @@ function renderPlayerChart(){
     const dataArr = BUNDLE.date_order.map(d=> dataByDate.hasOwnProperty(d) ? dataByDate[d] : null);
     const splitSegments = new Set();
     p.segments.forEach(s=>{ if(s.split){ const i0=BUNDLE.date_order.indexOf(s.from); splitSegments.add(i0); } });
+
+    // Switchers: color each stretch of the line by whichever alliance was actually active
+    // then (Cerb red / Orca blue) instead of one arbitrary palette color for the whole
+    // trajectory. The one ambiguous switch-window segment (already dashed) gets a neutral
+    // gold to signal "mixed/uncertain" rather than guessing red or blue for it.
+    let segmentColor;
+    if(p.switched_alliance){
+      const allianceAtDate = {};
+      p.points.forEach(pt=> allianceAtDate[pt.date] = pt.alliance);
+      segmentColor = ctx2 => {
+        if(splitSegments.has(ctx2.p0DataIndex)) return '#F5C244';
+        const d0 = BUNDLE.date_order[ctx2.p0DataIndex];
+        return allianceAtDate[d0] === 'Orca' ? ORCA : CERB;
+      };
+    }
+    const baseColor = p.switched_alliance ? (p.current_alliance==='Orca' ? ORCA : CERB) : color;
+
     datasets.push({
       label: p.name,
       data: dataArr,
-      borderColor: color,
-      backgroundColor: color+'20',
+      borderColor: baseColor,
+      backgroundColor: baseColor+'20',
       borderWidth: 2.5,
       spanGaps: true,
       tension: .2,
@@ -535,6 +571,7 @@ function renderPlayerChart(){
       pointHoverRadius: 7,
       segment: {
         borderDash: ctx2 => splitSegments.has(ctx2.p0DataIndex) ? [6,4] : undefined,
+        ...(segmentColor ? {borderColor: segmentColor} : {}),
       }
     });
   });
@@ -579,7 +616,7 @@ function statusBadge(r){
 }
 
 function top30For(alliance){
-  return computeRows().filter(r=>r.alliance===alliance && r.status==='active')
+  return computeRows().filter(r=>r.alliance===alliance && r.gained != null)
     .sort((a,b)=>(b.gained ?? -Infinity)-(a.gained ?? -Infinity))
     .slice(0,30);
 }
@@ -587,7 +624,9 @@ function top30For(alliance){
 function renderFullRoster(){
   const fromLbl = shortLabel(state.fromDate), toLbl = shortLabel(state.toDate);
   const rows = tableRows();
-  const totalGained = rows.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
+  const fromIdx = BUNDLE.date_order.indexOf(state.fromDate), toIdx = BUNDLE.date_order.indexOf(state.toDate);
+  const totals = allianceTotalsInRange(fromIdx, toIdx, playerMatchesFilters);
+  const totalGained = state.alliance==='all' ? (totals.Orca + totals.Cerb) : totals[state.alliance];
   document.getElementById('table-meta').textContent = `${rows.length} players · ${fmt(totalGained)} total kills gained (${fromLbl} → ${toLbl})`;
 
   const cols = [
@@ -637,18 +676,18 @@ function renderFullRoster(){
 function renderTop30(){
   const fromLbl = shortLabel(state.fromDate), toLbl = shortLabel(state.toDate);
   const orca = top30For('Orca'), cerb = top30For('Cerb');
-  const orcaTotal = orca.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
-  const cerbTotal = cerb.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
-  document.getElementById('table-meta').textContent = `Top 30 by kills gained, ${fromLbl} → ${toLbl} — Orca total: ${fmt(orcaTotal)} · Cerb total: ${fmt(cerbTotal)}`;
+  const fromIdx = BUNDLE.date_order.indexOf(state.fromDate), toIdx = BUNDLE.date_order.indexOf(state.toDate);
+  const trueTotals = allianceTotalsInRange(fromIdx, toIdx, playerMatchesFilters);
+  document.getElementById('table-meta').textContent = `Top 30 by kills gained, ${fromLbl} → ${toLbl} — Orca war total: ${fmt(trueTotals.Orca)} · Cerb war total: ${fmt(trueTotals.Cerb)}`;
 
   function buildTable(rows){
     if(!rows.length) return '<div class="small-note" style="padding:10px;">No data for this range.</div>';
-    const total = rows.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
+    const subtotal = rows.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
     let html = '<table class="data-table static"><thead><tr><th>#</th><th>Player</th><th>Leader</th><th>'+fromLbl+'</th><th>'+toLbl+'</th><th>Change</th></tr></thead><tbody>';
     rows.forEach((r,i)=>{
       html += `<tr>
         <td>${i+1}</td>
-        <td>${r.is_leader?'★ ':''}${r.name}</td>
+        <td>${r.is_leader?'★ ':''}${r.name}${r.status!=='active'?' <span class="switch-badge">'+(r.status==='left'?'left':'joined')+'</span>':''}</td>
         <td>${r.is_leader?'Yes':''}</td>
         <td>${fmt(r.fromKills)}</td>
         <td>${fmt(r.toKills)}</td>
@@ -656,7 +695,7 @@ function renderTop30(){
       </tr>`;
     });
     html += `<tr style="font-weight:700;border-top:2px solid var(--border);">
-      <td></td><td>Total</td><td></td><td></td><td></td><td>${fmt(total)}</td>
+      <td></td><td>Subtotal (this 30)</td><td></td><td></td><td></td><td>${fmt(subtotal)}</td>
     </tr>`;
     html += '</tbody></table>';
     return html;
@@ -664,8 +703,8 @@ function renderTop30(){
 
   document.getElementById('table-container').innerHTML = `
     <div class="chart-row casualty" style="margin-bottom:0;">
-      <div class="top30-col"><h3><span class="dot orca"></span> Orca Top 30 <span class="small-note">(${fmt(orcaTotal)} kills)</span></h3>${buildTable(orca)}</div>
-      <div class="top30-col"><h3><span class="dot cerb"></span> Cerb Top 30 <span class="small-note">(${fmt(cerbTotal)} kills)</span></h3>${buildTable(cerb)}</div>
+      <div class="top30-col"><h3><span class="dot orca"></span> Orca Top 30 <span class="small-note">(war total: ${fmt(trueTotals.Orca)} kills)</span></h3>${buildTable(orca)}</div>
+      <div class="top30-col"><h3><span class="dot cerb"></span> Cerb Top 30 <span class="small-note">(war total: ${fmt(trueTotals.Cerb)} kills)</span></h3>${buildTable(cerb)}</div>
     </div>`;
 }
 
@@ -677,9 +716,9 @@ function leadershipFor(alliance){
 function renderLeadership(){
   const fromLbl = shortLabel(state.fromDate), toLbl = shortLabel(state.toDate);
   const orca = leadershipFor('Orca'), cerb = leadershipFor('Cerb');
-  const orcaTotal = orca.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
-  const cerbTotal = cerb.reduce((sum,r)=> sum + (r.gained ?? 0), 0);
-  document.getElementById('table-meta').textContent = `Leadership comparison, ${fromLbl} → ${toLbl} — ${orca.length} Orca leaders (${fmt(orcaTotal)} kills) · ${cerb.length} Cerb leaders (${fmt(cerbTotal)} kills)`;
+  const fromIdx = BUNDLE.date_order.indexOf(state.fromDate), toIdx = BUNDLE.date_order.indexOf(state.toDate);
+  const trueTotals = allianceTotalsInRange(fromIdx, toIdx, p => playerMatchesFilters(p) && p.is_leader);
+  document.getElementById('table-meta').textContent = `Leadership comparison, ${fromLbl} → ${toLbl} — ${orca.length} Orca leaders (war total: ${fmt(trueTotals.Orca)} kills) · ${cerb.length} Cerb leaders (war total: ${fmt(trueTotals.Cerb)} kills)`;
 
   function buildTable(rows){
     if(!rows.length) return '<div class="small-note" style="padding:10px;">No data for this range.</div>';
