@@ -822,6 +822,9 @@ function renderCasualties(){
     // which would collapse to 0 whenever "From" is the baseline snapshot itself.
     warKills: (r.lastKills!=null && r.baselineKills!=null) ? (r.lastKills - r.baselineKills) : null,
     destBadge: destinationBadge(r),
+    // Prefer the exact reported departure date; fall back to their last-known snapshot
+    // appearance as a best-effort estimate so every row still sorts sensibly.
+    sortDate: (BUNDLE.manual_event_dates && BUNDLE.manual_event_dates[r.key]) || r.lastDate || null,
   }));
 
   // Alliance switchers: still present on the roster at "to", but under a different alliance
@@ -833,6 +836,7 @@ function renderCasualties(){
     key:r.key, name:r.name, is_leader:r.is_leader, alliance:r.fromAlliance, type:'switched',
     warKills: r.killsInFromAlliance,
     destBadge: switchDestinationBadge(r),
+    sortDate: (BUNDLE.manual_event_dates && BUNDLE.manual_event_dates[r.key]) || r.lastDate || null,
   }));
 
   // Ghost casualties: joined and departed entirely between measured snapshots, so they
@@ -844,11 +848,15 @@ function renderCasualties(){
       warKills: m.kills,
       destBadge: `<span class="dest-badge dest-gone">${m.leave_date ? 'Left ' + fmtDate(m.leave_date) : 'Left'} · no kill data</span>`,
       note: m.note,
+      sortDate: m.leave_date || null,
     }));
 
   const rows = [...leftRows, ...switchedRows, ...manualRows];
-  const orca = rows.filter(r=>r.alliance==='Orca').sort((a,b)=>(b.warKills??0)-(a.warKills??0));
-  const cerb = rows.filter(r=>r.alliance==='Cerb').sort((a,b)=>(b.warKills??0)-(a.warKills??0));
+  // Sorted ascending by the date the player left (earliest departures first). Rows without
+  // any known date (no exact report and no snapshot fallback) sort to the end.
+  const byLeaveDateAsc = (a,b) => (a.sortDate || '9999-99-99').localeCompare(b.sortDate || '9999-99-99');
+  const orca = rows.filter(r=>r.alliance==='Orca').sort(byLeaveDateAsc);
+  const cerb = rows.filter(r=>r.alliance==='Cerb').sort(byLeaveDateAsc);
 
   document.getElementById('orca-casualty-count').textContent = `(${orca.length})`;
   document.getElementById('cerb-casualty-count').textContent = `(${cerb.length})`;
